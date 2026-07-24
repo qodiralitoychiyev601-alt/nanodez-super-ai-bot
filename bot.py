@@ -1,10 +1,44 @@
-from __future__ import annotations
+"""
+NANODEZ Telegram buyurtma-boti — to'liq versiya
+--------------------------------------------------
+Funksiyalar:
+- Buyurtma qabul qilish (ism, zararkunanda turi, manzil, telefon)
+- "Biz haqimizda" va "Kafolat" bo'limlari
+- Buyurtma holatini kuzatish (Yangi -> Jarayonda -> Bajarildi)
+- Operatorlar guruhida /holat buyrug'i orqali holatni yangilash
+- Ish "Bajarildi" bo'lganda mijozga QR-kodli shartnoma (PDF) avtomatik yuboriladi
 
+Ishga tushirish:
+1. pip install -r requirements.txt
+2. python bot.py
+"""
+
+import asyncio
 import logging
+import os
 import random
-from dataclasses import dataclass, asdict
-from enum import IntEnum
-from typing import Any, Optional
+import sqlite3
+import string
+from datetime import datetime
+from io import BytesIO
+
+import qrcode
+import requests
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import mm
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_RIGHT
+from reportlab.lib.utils import ImageReader
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.platypus import (
+    SimpleDocTemplate,
+    Paragraph,
+    Spacer,
+    Table,
+    TableStyle,
+    PageBreak,
+)
 
 from telegram import (
     Update,
@@ -14,695 +48,486 @@ from telegram import (
     InlineKeyboardMarkup,
 )
 from telegram.ext import (
-    Application,
+    ApplicationBuilder,
     CommandHandler,
     MessageHandler,
-    CallbackQueryHandler,
     ConversationHandler,
+    CallbackQueryHandler,
     ContextTypes,
     filters,
 )
 
-# =========================
-# CONFIG
-# =========================
+# Kirill/lotin harflarini to'g'ri chizish uchun shrift ro'yxatdan o'tkaziladi
+FONT_DIR = os.path.dirname(os.path.abspath(__file__))
+pdfmetrics.registerFont(TTFont("DejaVu", os.path.join(FONT_DIR, "DejaVuSans.ttf")))
+pdfmetrics.registerFont(TTFont("DejaVu-Bold", os.path.join(FONT_DIR, "DejaVuSans-Bold.ttf")))
 
-BOT_TOKEN = "YOUR_BOT_TOKEN"
-GROUP_CHAT_ID = -1001234567890
+WEBSITE_URL = "https://nanodez.uz/"
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
+# ============ NANODEZ AI (Gemini) ============
+GEMINI_API_KEY = "AQ.Ab8RN6IIor7qJxgkjkQ9nOypVf4kM57J0N7esF2mTUqj9CAPKw"
+GEMINI_MODEL = "gemini-flash-latest"
+GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+
+AI_SYSTEM_PROMPT = (
+    "Sen NANODEZ kompaniyasining sun'iy intellekt yordamchisisan. Sen FAQAT quyidagi mavzularda "
+    "javob berasan: hasharotlar (tarakan, chumoli, qandala va h.k.), kemiruvchilar (sichqon, "
+    "kalamush), zararkunandalar, mikrob va infeksiyalar, dezinfeksiya, dezinseksiya, deratizatsiya "
+    "va uy/bino sanitariyasi.\n\n"
+    "Agar foydalanuvchi shu mavzularga aloqasi bo'lmagan narsa so'rasa (masalan siyosat, sport, "
+    "shaxsiy maslahat va h.k.), muloyimlik bilan faqat zararkunandalar va sanitariya mavzusida "
+    "yordam bera olishingni ayt va suhbatni shu mavzuga qaytar.\n\n"
+    "Javoblaring qisqa, tushunarli va foydali bo'lsin (o'zbek tilida, lotin alifbosida). "
+    "Agar foydalanuvchining tavsifidan uning uyida yoki binosida jiddiy zararkunanda muammosi "
+    "borligi ko'rinsa, javob oxirida NANODEZ xizmatlarini tavsiya qil — masalan, professional "
+    "yordam uchun botdagi \"📝 Buyurtma berish\" tugmasidan foydalanishni taklif qil. Har bir "
+    "javobda majburiy emas, faqat mos kelganda tavsiya qil."
 )
+
+# ============ SOZLAMALAR ============
+BOT_TOKEN = "8984817143:AAGhVN_3GwNStdD26PAZW5eJOmAxsKL-IxA"
+GROUP_CHAT_ID = "-5392028380"
+DB_PATH = "nanodez.db"
+
+ABOUT_TEXT = (
+    "🏢 <b>NANODEZ haqida</b>\n\n"
+    "\"NANO DEZ\" MChJ — O'zbekiston Respublikasi Sog'liqni saqlash vazirligi "
+    "tomonidan litsenziyalangan (litsenziya № 779115) dezinfeksiya, dezinseksiya "
+    "va deratizatsiya xizmatlari kompaniyasi.\n\n"
+    "✅ 8 yillik tajribaga ega xodimlar\n"
+    "✅ 5000 dan ortiq turar-joy va yuridik binolarga xizmat ko'rsatilgan\n"
+    "✅ 12 viloyatda faoliyat yuritamiz\n"
+    "✅ Rasmiy tibbiy litsenziya asosida ishlaymiz\n\n"
+    "🌐 Sayt: https://nanodez.uz/\n"
+    "✈️ Telegram kanal: https://t.me/nanodez_uz\n"
+    "📸 Instagram: https://www.instagram.com/nanodez_uz\n"
+    "▶️ YouTube: https://youtube.com/@nanodez_uz\n"
+    "🎵 TikTok: https://www.tiktok.com/@nanodez_pest_control\n"
+    "📞 Murojaat uchun: +998 55-511-11-13"
+)
+
+WARRANTY_TEXT = (
+    "🛡️ <b>NANODEZ KAFOLATI</b>\n\n"
+    "✅ Har bir xizmat uchun yozma yoki elektron kafolat taqdim etiladi.\n"
+    "📅 Kafolat muddati: bajarilgan xizmat turiga qarab 3 oydan 1 yilgacha.\n"
+    "📋 Kafolat davomida:\n"
+    "• Zararkunandalar qayta paydo bo'lsa, bepul qayta ishlov beriladi.\n"
+    "• Kafolat shartlariga rioya qilingan bo'lishi kerak.\n"
+    "• Kafolat shartnomada ko'rsatiladi.\n\n"
+    "📞 Batafsil ma'lumot: +998 55 511-11-13\n"
+    "💬 Buyurtma berish uchun \"📝 Buyurtma berish\" tugmasini bosing."
+)
+# =====================================
+
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-SKIP_VALUE = "Kiritilmagan"
-ORDER_PREFIX = "NDZ"
+# Suhbat bosqichlari
+NAME, PEST_TYPE, ADDRESS, PHONE = range(4)
+C_CUSTOMER_ID, C_NAME, C_ADDRESS, C_PHONE, C_AMOUNT, C_WARRANTY, C_CONFIRM = range(10, 17)
+
+BACK_BUTTON = "⬅️ Orqaga"
+
+PEST_OPTIONS = [
+    ["Tarakan", "Chumoli"],
+    ["Kemiruvchilar (sichqon/kalamush)"],
+    ["Qandala", "Boshqa"],
+    [BACK_BUTTON],
+]
+
+MAIN_MENU = [
+    ["📝 Buyurtma berish"],
+    ["ℹ️ Biz haqimizda", "🛡 Kafolat"],
+    ["📦 Buyurtmam holati"],
+    ["🤖 NANODEZ AI"],
+]
+
+STATUS_LABELS = {
+    "yangi": "🆕 Yangi",
+    "jarayonda": "⏳ Jarayonda",
+    "bajarildi": "✅ Bajarildi",
+}
 
 
-# =========================
-# STATES
-# =========================
+# ---------- Ma'lumotlar bazasi ----------
 
-class OrderState(IntEnum):
-    NAME = 0
-    PHONE = 1
-    ADDRESS = 2
-    OBJECT_TYPE = 3
-    PEST_TYPE = 4
-    MEDIA = 5
-    TIME = 6
-    PAYMENT = 7
-    NOTE = 8
-    CONFIRM = 9
-
-
-# =========================
-# DATA MODEL
-# =========================
-
-@dataclass
-class OrderDraft:
-    name: str = ""
-    phone: str = ""
-    address: str = ""
-    object_type: str = SKIP_VALUE
-    pest_type: str = SKIP_VALUE
-    media_type: str = SKIP_VALUE
-    media_file_id: str = SKIP_VALUE
-    time: str = SKIP_VALUE
-    payment: str = SKIP_VALUE
-    note: str = SKIP_VALUE
-
-
-# =========================
-# HELPERS
-# =========================
-
-def get_draft(context: ContextTypes.DEFAULT_TYPE) -> OrderDraft:
-    raw = context.user_data.get("order_draft")
-    if not raw:
-        draft = OrderDraft()
-        context.user_data["order_draft"] = asdict(draft)
-        return draft
-    return OrderDraft(**raw)
-
-
-def save_draft(context: ContextTypes.DEFAULT_TYPE, draft: OrderDraft) -> None:
-    context.user_data["order_draft"] = asdict(draft)
-
-
-def clear_draft(context: ContextTypes.DEFAULT_TYPE) -> None:
-    context.user_data.pop("order_draft", None)
-    context.user_data.pop("order_step", None)
-
-
-def set_step(context: ContextTypes.DEFAULT_TYPE, state: OrderState) -> None:
-    context.user_data["order_step"] = int(state)
-
-
-def normalize_text(text: str) -> str:
-    return text.strip()
-
-
-def normalize_phone(text: str) -> str:
-    return (
-        text.replace(" ", "")
-        .replace("-", "")
-        .replace("(", "")
-        .replace(")", "")
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS orders (
+            order_id TEXT PRIMARY KEY,
+            user_id INTEGER,
+            username TEXT,
+            name TEXT,
+            pest_type TEXT,
+            address TEXT,
+            phone TEXT,
+            status TEXT DEFAULT 'yangi',
+            created_at TEXT,
+            amount TEXT,
+            warranty TEXT
+        )
+        """
     )
-
-
-def is_valid_name(text: str) -> bool:
-    return len(text.strip()) >= 2
-
-
-def is_valid_phone(text: str) -> bool:
-    phone = normalize_phone(text)
-    return phone.startswith("+") or phone.isdigit()
+    conn.commit()
+    conn.close()
 
 
 def generate_order_id() -> str:
-    return f"{ORDER_PREFIX}-{random.randint(100000, 999999)}"
+    suffix = "".join(random.choices(string.digits, k=6))
+    return f"NDZ-{suffix}"
 
 
-def format_location(update: Update) -> str:
-    loc = update.message.location
-    return f"{loc.latitude}, {loc.longitude}"
-
-
-def confirmation_text(draft: OrderDraft) -> str:
-    return (
-        "━━━━━━━━━━━━━━
-"
-        "📋 BUYURTMA MA'LUMOTLARI
-"
-        f"👤 Ism: {draft.name}
-"
-        f"📞 Telefon: {draft.phone}
-"
-        f"📍 Manzil: {draft.address}
-"
-        f"🏠 Obyekt: {draft.object_type}
-"
-        f"🐜 Zararkunanda: {draft.pest_type}
-"
-        f"🖼 Rasm: {draft.media_type}
-"
-        f"🕒 Qulay vaqt: {draft.time}
-"
-        f"💳 To'lov: {draft.payment}
-"
-        f"📝 Izoh: {draft.note}
-"
-        "━━━━━━━━━━━━━━"
+def save_order(order_id, user_id, username, name, pest_type, address, phone):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "INSERT INTO orders (order_id, user_id, username, name, pest_type, address, phone, status, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, 'yangi', ?)",
+        (order_id, user_id, username, name, pest_type, address, phone, datetime.now().isoformat()),
     )
+    conn.commit()
+    conn.close()
 
 
-# =========================
-# KEYBOARDS
-# =========================
+def get_order(order_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.execute("SELECT * FROM orders WHERE order_id = ?", (order_id,))
+    row = cur.fetchone()
+    conn.close()
+    return row
 
-def kb_name():
-    return ReplyKeyboardMarkup(
-        [["⬅️ Ortga", "❌ Bekor qilish"]],
-        resize_keyboard=True
+
+def get_latest_order_for_user(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.execute(
+        "SELECT * FROM orders WHERE user_id = ? ORDER BY created_at DESC LIMIT 1", (user_id,)
     )
+    row = cur.fetchone()
+    conn.close()
+    return row
 
 
-def kb_phone():
-    return ReplyKeyboardMarkup(
-        [["📱 Kontakt yuborish"], ["⬅️ Ortga", "❌ Bekor qilish"]],
-        resize_keyboard=True
+def update_status(order_id, status):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE orders SET status = ? WHERE order_id = ?", (status, order_id))
+    conn.commit()
+    conn.close()
+
+
+def complete_order(order_id, amount, warranty):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "UPDATE orders SET status = 'bajarildi', amount = ?, warranty = ? WHERE order_id = ?",
+        (amount, warranty, order_id),
     )
+    conn.commit()
+    conn.close()
 
 
-def kb_address():
-    return ReplyKeyboardMarkup(
-        [["📍 Joylashuv yuborish"], ["⬅️ Ortga", "❌ Bekor qilish"]],
-        resize_keyboard=True
+# ---------- Shartnoma (to'liq rasmiy PDF + QR) ----------
+
+UZ_MONTHS = {
+    1: "январь", 2: "феврал", 3: "март", 4: "апрель", 5: "май", 6: "июнь",
+    7: "июль", 8: "август", 9: "сентябрь", 10: "октябрь", 11: "ноябрь", 12: "декабрь",
+}
+
+_styles = {
+    "title": ParagraphStyle("title", fontName="DejaVu-Bold", fontSize=15, alignment=TA_CENTER, spaceAfter=10),
+    "logo": ParagraphStyle("logo", fontName="DejaVu-Bold", fontSize=13, alignment=TA_RIGHT),
+    "logo_sub": ParagraphStyle("logo_sub", fontName="DejaVu", fontSize=8, alignment=TA_RIGHT, textColor="#555555"),
+    "city_date": ParagraphStyle("city_date", fontName="DejaVu-Bold", fontSize=10, spaceAfter=8),
+    "body": ParagraphStyle("body", fontName="DejaVu", fontSize=9.5, alignment=TA_JUSTIFY, leading=13, spaceAfter=6),
+    "heading": ParagraphStyle("heading", fontName="DejaVu-Bold", fontSize=10.5, alignment=TA_CENTER, spaceBefore=10, spaceAfter=6),
+    "small": ParagraphStyle("small", fontName="DejaVu", fontSize=8.5, leading=12),
+    "small_bold": ParagraphStyle("small_bold", fontName="DejaVu-Bold", fontSize=9),
+}
+
+
+def build_contract_pdf(order_row) -> BytesIO:
+    (order_id, user_id, username, name, pest_type, address, phone, status, created_at, amount, warranty) = order_row
+
+    try:
+        order_date = datetime.fromisoformat(created_at)
+    except Exception:
+        order_date = datetime.now()
+    day = order_date.day
+    month_name = UZ_MONTHS.get(order_date.month, "")
+    year = order_date.year
+
+    amount_display = amount or "-"
+
+    qr_content = (
+        f"NANODEZ | Litsenziya No779115 | Shartnoma: {order_id} | "
+        f"Mijoz: {name} | Summa: {amount_display} | Sana: {day}.{order_date.month:02d}.{year} | {WEBSITE_URL}"
     )
+    qr_img = qrcode.make(qr_content)
+    qr_buffer = BytesIO()
+    qr_img.save(qr_buffer, format="PNG")
+    qr_buffer.seek(0)
 
-
-def kb_object_type():
-    return ReplyKeyboardMarkup(
-        [
-            ["🏠 Xonadon", "🏢 Ofis"],
-            ["🏬 Do'kon", "🏭 Korxona"],
-            ["🌾 Ferma", "🏫 Davlat tashkiloti"],
-            ["🏨 Mehmonxona", "📦 Ombor"],
-            ["🔹 Boshqa", "🔸 O'tkazib yuborish"],
-            ["⬅️ Ortga", "❌ Bekor qilish"],
-        ],
-        resize_keyboard=True
+    pdf_buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        pdf_buffer, pagesize=A4,
+        leftMargin=20 * mm, rightMargin=20 * mm, topMargin=15 * mm, bottomMargin=15 * mm,
     )
+    story = []
+    s = _styles
 
-
-def kb_pest_type():
-    return ReplyKeyboardMarkup(
-        [
-            ["🪳 Suvarak", "🐭 Sichqon"],
-            ["🐜 Chumoli", "🦟 Chivin"],
-            ["🕷 O'rgimchak", "🐝 Ari"],
-            ["🐍 Ilon", "🦂 Chayon"],
-            ["🔹 Boshqa", "🔸 O'tkazib yuborish"],
-            ["⬅️ Ortga", "❌ Bekor qilish"],
-        ],
-        resize_keyboard=True
+    # ---- Sarlavha ----
+    header_tbl = Table(
+        [[Paragraph(f"Шартнома № {order_id}", ParagraphStyle("h", fontName="DejaVu-Bold", fontSize=13)),
+          Paragraph("NANODEZ<br/><font size=8 color='#555555'>pest control</font>", s["logo"])]],
+        colWidths=[110 * mm, 60 * mm],
     )
+    header_tbl.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP")]))
+    story.append(header_tbl)
+    story.append(Spacer(1, 8 * mm))
 
+    story.append(Paragraph(
+        f"Тошкент шаҳри&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"
+        f"&laquo;{day}&raquo; {month_name} {year} й.",
+        s["city_date"],
+    ))
 
-def kb_media():
-    return ReplyKeyboardMarkup(
-        [["🔸 O'tkazib yuborish"], ["⬅️ Ortga", "❌ Bekor qilish"]],
-        resize_keyboard=True
+    story.append(Paragraph(
+        "2025 йил 19 май кунидаги 779115 - сонли лицензия ва Устави асосида фаолият олиб борувчи "
+        "\"NANO DEZ\" МЧЖ бир томондан ва жамиятнинг (бундан кейин \"Бажарувчи\" деб юритилади) номидан "
+        "иш юритувчи директор А.А.БОБОРАИМОВ бир томондан, иккинчи томондан (бундан кейин \"Буюртмачи\" "
+        f"деб юритилади) <b>{name}</b> ва улар тақдим этган шахсий сўрови асосида ушбу шартномани "
+        "қуйидагича туздик:",
+        s["body"],
+    ))
+
+    story.append(Paragraph("1. ШАРТНОМА ПРЕДМЕТИ", s["heading"]))
+    story.append(Paragraph(
+        "1.1. Бажарувчи Буюртмачининг буюртмасига биноан қуйида келтирилган санитария ишларини ва "
+        "бошқа турдаги хизматларни бажариш мажбуриятини ўз зиммасига олади:",
+        s["body"],
+    ))
+
+    table_data = [
+        ["№", "Хизматлар тури", "Ул.Бирл", "Миқ", "Нархи", "Сумма"],
+        ["1", pest_type, "хизмат", "1", amount_display, amount_display],
+        ["", "Жами бўлиб:", "", "", "", amount_display],
+    ]
+    tbl = Table(table_data, colWidths=[10 * mm, 65 * mm, 20 * mm, 15 * mm, 25 * mm, 25 * mm])
+    tbl.setStyle(TableStyle([
+        ("FONTNAME", (0, 0), (-1, -1), "DejaVu"),
+        ("FONTNAME", (0, 0), (-1, 0), "DejaVu-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 8.5),
+        ("GRID", (0, 0), (-1, -1), 0.5, "#888888"),
+        ("BACKGROUND", (0, 0), (-1, 0), "#e8f0fe"),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("SPAN", (0, 2), (1, 2)),
+    ]))
+    story.append(tbl)
+    story.append(Spacer(1, 4 * mm))
+
+    story.append(Paragraph(
+        "1.2. Бажариладиган ишнинг ҳажми иш бошланишидан аввал ҳар икки томоннинг ўзаро келишувига "
+        "биноан белгиланади. Хизмат кўрсатиладиган объектнинг санитария ҳолатини ҳисобга олган ҳолда.",
+        s["body"],
+    ))
+    story.append(Paragraph(
+        "1.3. Ҳашоратларга қарши дезинсекция ишлари бирон бир уй ёки иншоотда амалга оширилаётган "
+        "ҳолларда, биринчи навбатда ўша уй ёки иншоотнинг пол қисмига махсус дори воситалари билан "
+        "ишлов берилади. Кейин эса заруриятга қараб бино деворларига, шифтлар, ертўла, ахлат қутиси, "
+        "керак бўлса, суғориш ариқлари ва объект ёнида ўсадиган яшил майдонлар дориланиб, ишлов берилади.",
+        s["body"],
+    ))
+
+    story.append(Paragraph("2. ШАРТНОМАНИНГ БАҲОЛАНИШИ ВА ТЎЛОВНИ АМАЛГА ОШИРИШ ТАРТИБИ", s["heading"]))
+    story.append(Paragraph(
+        f"2.1. Шартномада кўрсатилган хизматлар эвазига амалга оширилиши лозим бўлган тўлов суммаси: "
+        f"<b>{amount_display} сўм</b>.",
+        s["body"],
+    ))
+    story.append(Paragraph(
+        "2.2. Буюртмачи шартнома икки томонлама имзоланганидан сўнг келишилган тўловни Бажарувчининг "
+        "ҳисоб рақамига ўтказади.",
+        s["body"],
+    ))
+
+    story.append(Paragraph("3. ТОМОНЛАРНИНГ ҲУҚУҚ ВА МАЖБУРИЯТЛАРИ", s["heading"]))
+    story.append(Paragraph(
+        "3.1. Бажарувчи мутахассисининг ўз ишини бажариши учун шароит яратиб бериш ва объектга эркин "
+        "кириб чиқишини таъминлаш Буюртмачининг мажбурияти ҳисобланади.",
+        s["body"],
+    ))
+    story.append(Paragraph(
+        "3.2. Бажарувчи ушбу шартнома шартларига мувофиқ иш босқичларини ўз вақтида ва сифатли бажариш, "
+        "хизматлар кўрсатилгандан сўнг маълумотларнинг махфийлигини сақлаш мажбуриятини ўз зиммасига олади.",
+        s["body"],
+    ))
+    story.append(Paragraph(
+        f"3.3. Бажарувчи объект эски бўлмаган ва зарарли ҳашаротлар ва кемирувчиларнинг кўпайишига "
+        f"мойил бўлмаган тақдирда <b>{warranty or '____'}</b> давомида кўрсатилган санитария хизматлари "
+        "учун қайта ишлов бериш кафолатини беради.",
+        s["body"],
+    ))
+
+    story.append(Paragraph("4. ТОМОНЛАРНИНГ МАСЪУЛИЯТЛАРИ", s["heading"]))
+    story.append(Paragraph(
+        "4.1. Ушбу шартнома бўйича ўз зиммаларига олган мажбуриятларни бузганлик учун томонлар "
+        "Ўзбекистон Республикаси қонун ҳужжатларида белгиланган тартибда жавобгар бўладилар.",
+        s["body"],
+    ))
+
+    story.append(Paragraph("5. ФОРС-МАЖОР ҲОЛАТЛАРИ", s["heading"]))
+    story.append(Paragraph(
+        "5.1. Томонларнинг ҳеч бири олдиндан айтиб бўлмайдиган ёки олдини олиш мумкин бўлмаган "
+        "ҳолатлар туфайли ушбу шартнома бўйича мажбуриятларни кечиктириш ёки бажармаслик учун бошқа "
+        "томон олдида жавобгар бўлмайди.",
+        s["body"],
+    ))
+
+    story.append(Paragraph("6. ШАРТНОМАНИНГ АМАЛ ҚИЛИШ МУДДАТИ", s["heading"]))
+    story.append(Paragraph(
+        "6.1. Ушбу шартнома томонлар имзолаган пайтдан бошлаб кучга киради ва кафолат берилган "
+        "муддатгача амал қилади.",
+        s["body"],
+    ))
+
+    story.append(Spacer(1, 4 * mm))
+    story.append(Paragraph("8. ТОМОНЛАРНИНГ ҲУҚУҚИЙ МАНЗИЛЛАРИ ВА РЕКВИЗИТЛАРИ", s["heading"]))
+
+    parties_data = [
+        [Paragraph("<b>Бажарувчи:</b>", s["small_bold"]), Paragraph("<b>Буюртмачи:</b>", s["small_bold"])],
+        [Paragraph(
+            "\"NANO DEZ\" МЧЖ<br/>"
+            "Адрес: Тошкент вил, Бекобод тумани, Қушчи МФЙ, Гулистон кўч 342-уй<br/>"
+            "Тошкент ш., \"Ҳамкор-банк\" АТ Миробод филиали, МФО 00083<br/>"
+            "Р/сч: 20208000207186790001<br/>"
+            "ИНН 311813026<br/>"
+            "Директор: BOBORAIMOV ABDURASHID<br/>"
+            "Колл-центр: 55 511-11-13<br/>"
+            f"Веб-сайт: {WEBSITE_URL}",
+            s["small"],
+        ), Paragraph(
+            f"Ф.И.Ш: {name}<br/>"
+            f"Манзил: {address}<br/>"
+            f"Телефон: {phone}<br/>"
+            f"Шартнома рақами: {order_id}<br/>"
+            f"Хизмат тури: {pest_type}<br/>"
+            f"Тўлов суммаси: {amount_display} сўм",
+            s["small"],
+        )],
+    ]
+    parties_tbl = Table(parties_data, colWidths=[90 * mm, 70 * mm])
+    parties_tbl.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("TOPPADDING", (0, 1), (-1, 1), 4),
+    ]))
+    story.append(parties_tbl)
+
+    story.append(Spacer(1, 8 * mm))
+    qr_reader = ImageReader(qr_buffer)
+    qr_tbl = Table(
+        [[Paragraph(
+            "Ушбу ҳужжат NANODEZ tomonidan avtomatik yaratilgan bo'lib, "
+            f"xizmat yakunlanganini tasdiqlaydi.<br/>Rasmiy sayt: {WEBSITE_URL}",
+            s["small"],
+        ), ""]],
+        colWidths=[130 * mm, 30 * mm],
     )
+    story.append(qr_tbl)
+
+    def _draw_qr(canvas, doc_):
+        canvas.saveState()
+        canvas.drawImage(qr_reader, doc_.pagesize[0] - 45 * mm, 15 * mm, 30 * mm, 30 * mm)
+        canvas.setFont("DejaVu", 7)
+        canvas.drawCentredString(doc_.pagesize[0] - 30 * mm, 12 * mm, "Tekshirish uchun QR-kod")
+        canvas.restoreState()
+
+    doc.build(story, onFirstPage=_draw_qr, onLaterPages=_draw_qr)
+    pdf_buffer.seek(0)
+    return pdf_buffer
 
 
-def kb_time():
-    return ReplyKeyboardMarkup(
-        [
-            ["🌅 Ertalab", "☀️ Kunduzi"],
-            ["🌆 Kechqurun", "📞 Operator bilan kelishaman"],
-            ["🔸 O'tkazib yuborish"],
-            ["⬅️ Ortga", "❌ Bekor qilish"],
-        ],
-        resize_keyboard=True
-    )
+# ---------- Asosiy menyu va bo'limlar ----------
 
-
-def kb_payment():
-    return ReplyKeyboardMarkup(
-        [
-            ["💵 Naqd", "💳 Karta"],
-            ["🏦 Bank o'tkazmasi", "🔸 O'tkazib yuborish"],
-            ["⬅️ Ortga", "❌ Bekor qilish"],
-        ],
-        resize_keyboard=True
-    )
-
-
-def kb_note():
-    return ReplyKeyboardMarkup(
-        [["🔸 O'tkazib yuborish"], ["⬅️ Ortga", "❌ Bekor qilish"]],
-        resize_keyboard=True
-    )
-
-
-def kb_confirm():
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("✅ Tasdiqlash va yuborish", callback_data="confirm")],
-            [
-                InlineKeyboardButton("✏️ Tahrirlash", callback_data="edit"),
-                InlineKeyboardButton("❌ Bekor qilish", callback_data="cancel"),
-            ],
-        ]
-    )
-
-
-# =========================
-# INTEGRATIONS
-# =========================
-
-async def write_to_google_sheets(order_id: str, draft: OrderDraft, user: Any) -> None:
-    logger.info("Google Sheetsga yozish: %s | %s", order_id, draft)
-
-
-async def send_to_crm(order_id: str, draft: OrderDraft, user: Any) -> None:
-    logger.info("CRMga yuborish: %s | %s", order_id, draft)
-
-
-async def send_to_operator(update: Update, order_id: str, draft: OrderDraft) -> None:
-    text = (
-        "🆕 YANGI BUYURTMA
-"
-        f"🆔 {order_id}
-"
-        f"👤 {draft.name}
-"
-        f"📞 {draft.phone}
-"
-        f"📍 {draft.address}
-"
-        f"🏠 {draft.object_type}
-"
-        f"🐜 {draft.pest_type}
-"
-        f"🖼 {draft.media_type}
-"
-        f"🕒 {draft.time}
-"
-        f"💳 {draft.payment}
-"
-        f"📝 {draft.note}"
-    )
-    await update.effective_chat.send_message(text)
-
-
-# =========================
-# START / CANCEL
-# =========================
-
-async def start_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    clear_draft(context)
-    save_draft(context, OrderDraft())
-    set_step(context, OrderState.NAME)
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data["ai_mode"] = False
     await update.message.reply_text(
-        "Buyurtma berish uchun ismingizni kiriting.",
-        reply_markup=kb_name(),
-    )
-    return OrderState.NAME
-
-
-async def cancel_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    clear_draft(context)
-    await update.message.reply_text(
-        "Buyurtma bekor qilindi.",
-        reply_markup=ReplyKeyboardRemove(),
+        "Assalomu alaykum! NANODEZ zararkunandalarga qarshi xizmat botiga xush kelibsiz.\n\n"
+        "Quyidagi menyudan foydalaning:",
+        reply_markup=ReplyKeyboardMarkup(MAIN_MENU, resize_keyboard=True),
     )
     return ConversationHandler.END
 
 
-# =========================
-# STATES
-# =========================
+async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(ABOUT_TEXT, parse_mode="HTML")
 
-async def name_state(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    text = normalize_text(update.message.text)
 
-    if text == "❌ Bekor qilish":
-        return await cancel_order(update, context)
+async def warranty(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(WARRANTY_TEXT, parse_mode="HTML")
 
-    if text == "⬅️ Ortga":
-        return await start_order(update, context)
 
-    if not is_valid_name(text):
-        await update.message.reply_text(
-            "Iltimos, ismni to'g'ri kiriting. Masalan: Ali",
-            reply_markup=kb_name(),
-        )
-        return OrderState.NAME
-
-    draft = get_draft(context)
-    draft.name = text
-    save_draft(context, draft)
-    set_step(context, OrderState.PHONE)
-
+async def my_order_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    row = get_latest_order_for_user(user_id)
+    if not row:
+        await update.message.reply_text("Sizda hali buyurtma topilmadi. \"📝 Buyurtma berish\" tugmasini bosing.")
+        return
+    order_id, *_rest, status, created_at = row
+    label = STATUS_LABELS.get(status, status)
     await update.message.reply_text(
-        "Telefon raqamingizni kiriting yoki kontakt yuboring.",
-        reply_markup=kb_phone(),
+        f"📦 Buyurtma raqami: {order_id}\n"
+        f"Holat: {label}\n"
+        f"Sana: {created_at[:10]}"
     )
-    return OrderState.PHONE
 
 
-async def phone_state(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    text = normalize_text(update.message.text or "")
+# ---------- NANODEZ AI (Gemini) ----------
 
-    if text == "❌ Bekor qilish":
-        return await cancel_order(update, context)
+def _call_gemini_sync(user_message: str) -> str:
+    headers = {"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"}
+    payload = {
+        "system_instruction": {"parts": [{"text": AI_SYSTEM_PROMPT}]},
+        "contents": [{"role": "user", "parts": [{"text": user_message}]}],
+    }
+    resp = requests.post(GEMINI_URL, headers=headers, json=payload, timeout=30)
+    resp.raise_for_status()
+    data = resp.json()
+    return data["candidates"][0]["content"]["parts"][0]["text"]
 
-    if text == "⬅️ Ortga":
-        set_step(context, OrderState.NAME)
-        await update.message.reply_text(
-            "Ismingizni qayta kiriting.",
-            reply_markup=kb_name(),
+
+async def ask_gemini(user_message: str) -> str:
+    try:
+        return await asyncio.to_thread(_call_gemini_sync, user_message)
+    except Exception as e:
+        logger.warning("Gemini AI xatosi: %s", e)
+        return (
+            "Kechirasiz, hozir javob berishda muammo yuzaga keldi. "
+            "Birozdan so'ng qayta urinib ko'ring, yoki \"📝 Buyurtma berish\" orqali "
+            "to'g'ridan-to'g'ri operatorga murojaat qiling."
         )
-        return OrderState.NAME
 
-    draft = get_draft(context)
 
-    if update.message.contact:
-        draft.phone = normalize_phone(update.message.contact.phone_number)
-        save_draft(context, draft)
-        set_step(context, OrderState.ADDRESS)
-        await update.message.reply_text(
-            "Manzilingizni yozing yoki joylashuv yuboring.",
-            reply_markup=kb_address(),
-        )
-        return OrderState.ADDRESS
-
-    if not is_valid_phone(text):
-        await update.message.reply_text(
-            "Telefon raqam noto'g'ri. Masalan: +998901234567",
-            reply_markup=kb_phone(),
-        )
-        return OrderState.PHONE
-
-    draft.phone = normalize_phone(text)
-    save_draft(context, draft)
-    set_step(context, OrderState.ADDRESS)
-
+async def ai_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["ai_mode"] = True
     await update.message.reply_text(
-        "Manzilingizni yozing yoki joylashuv yuboring.",
-        reply_markup=kb_address(),
+        "🤖 NANODEZ AI ga xush kelibsiz!\n\n"
+        "Hasharotlar, kemiruvchilar, zararkunandalar va mikrob-infeksiyalar haqida "
+        "istalgan savolingizni yozing. Chiqish uchun \"⬅️ Orqaga\" tugmasini bosing.",
+        reply_markup=BACK_ONLY_KEYBOARD,
     )
-    return OrderState.ADDRESS
 
 
-async def address_state(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    text = normalize_text(update.message.text or "")
+async def ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get("ai_mode"):
+        return
 
-    if text == "❌ Bekor qilish":
-        return await cancel_order(update, context)
-
-    if text == "⬅️ Ortga":
-        set_step(context, OrderState.PHONE)
+    if update.message.text == BACK_BUTTON:
+        context.user_data["ai_mode"] = False
         await update.message.reply_text(
-            "Telefon raqamingizni qayta yuboring.",
-            reply_markup=kb_phone(),
+            "Bosh menyuga qaytdingiz.",
+            reply_markup=ReplyKeyboardMarkup(MAIN_MENU, resize_keyboard=True),
         )
-        return OrderState.PHONE
+        return
 
-    draft = get_draft(context)
-
-    if update.message.location:
-        draft.address = format_location(update)
-    else:
-        if len(text) < 4:
-            await update.message.reply_text(
-                "Manzil juda qisqa. To'liq manzil kiriting.",
-                reply_markup=kb_address(),
-            )
-            return OrderState.ADDRESS
-        draft.address = text
-
-    save_draft(context, draft)
-    set_step(context, OrderState.OBJECT_TYPE)
-
-    await update.message.reply_text(
-        "Obyekt turini tanlang yoki o'tkazib yuboring.",
-        reply_markup=kb_object_type(),
-    )
-    return OrderState.OBJECT_TYPE
-
-
-async def object_type_state(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    text = normalize_text(update.message.text)
-
-    if text == "❌ Bekor qilish":
-        return await cancel_order(update, context)
-
-    if text == "⬅️ Ortga":
-        set_step(context, OrderState.ADDRESS)
-        await update.message.reply_text(
-            "Manzilni qayta kiriting.",
-            reply_markup=kb_address(),
-        )
-        return OrderState.ADDRESS
-
-    draft = get_draft(context)
-    draft.object_type = SKIP_VALUE if text == "🔸 O'tkazib yuborish" else text
-    save_draft(context, draft)
-    set_step(context, OrderState.PEST_TYPE)
-
-    await update.message.reply_text(
-        "Zararkunanda turini tanlang yoki o'tkazib yuboring.",
-        reply_markup=kb_pest_type(),
-    )
-    return OrderState.PEST_TYPE
-
-
-async def pest_type_state(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    text = normalize_text(update.message.text)
-
-    if text == "❌ Bekor qilish":
-        return await cancel_order(update, context)
-
-    if text == "⬅️ Ortga":
-        set_step(context, OrderState.OBJECT_TYPE)
-        await update.message.reply_text(
-            "Obyekt turini qayta tanlang.",
-            reply_markup=kb_object_type(),
-        )
-        return OrderState.OBJECT_TYPE
-
-    draft = get_draft(context)
-    draft.pest_type = SKIP_VALUE if text == "🔸 O'tkazib yuborish" else text
-    save_draft(context, draft)
-    set_step(context, OrderState.MEDIA)
-
-    await update.message.reply_text(
-        "Muammo rasmi, video yoki dokument yuboring.",
-        reply_markup=kb_media(),
-    )
-    return OrderState.MEDIA
-
-
-async def media_state(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    text = normalize_text(update.message.text or "")
-
-    if text == "❌ Bekor qilish":
-        return await cancel_order(update, context)
-
-    if text == "⬅️ Ortga":
-        set_step(context, OrderState.PEST_TYPE)
-        await update.message.reply_text(
-            "Zararkunanda turini qayta tanlang.",
-            reply_markup=kb_pest_type(),
-        )
-        return OrderState.PEST_TYPE
-
-    draft = get_draft(context)
-
-    if text == "🔸 O'tkazib yuborish":
-        draft.media_type = SKIP_VALUE
-        draft.media_file_id = SKIP_VALUE
-    elif update.message.photo:
-        draft.media_type = "Photo"
-        draft.media_file_id = update.message.photo[-1].file_id
-    elif update.message.video:
-        draft.media_type = "Video"
-        draft.media_file_id = update.message.video.file_id
-    elif update.message.document:
-        draft.media_type = "Document"
-        draft.media_file_id = update.message.document.file_id
-    else:
-        await update.message.reply_text(
-            "Iltimos, photo, video, document yuboring yoki o'tkazib yuboring.",
-            reply_markup=kb_media(),
-        )
-        return OrderState.MEDIA
-
-    save_draft(context, draft)
-    set_step(context, OrderState.TIME)
-
-    await update.message.reply_text(
-        "Qulay vaqtni tanlang yoki o'tkazib yuboring.",
-        reply_markup=kb_time(),
-    )
-    return OrderState.TIME
-
-
-async def time_state(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    text = normalize_text(update.message.text)
-
-    if text == "❌ Bekor qilish":
-        return await cancel_order(update, context)
-
-    if text == "⬅️ Ortga":
-        set_step(context, OrderState.MEDIA)
-        await update.message.reply_text(
-            "Muammo rasmini qayta yuboring yoki o'tkazib yuboring.",
-            reply_markup=kb_media(),
-        )
-        return OrderState.MEDIA
-
-    draft = get_draft(context)
-    draft.time = SKIP_VALUE if text == "🔸 O'tkazib yuborish" else text
-    save_draft(context, draft)
-    set_step(context, OrderState.PAYMENT)
-
-    await update.message.reply_text(
-        "To'lov turini tanlang yoki o'tkazib yuboring.",
-        reply_markup=kb_payment(),
-    )
-    return OrderState.PAYMENT
-
-
-async def payment_state(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    text = normalize_text(update.message.text)
-
-    if text == "❌ Bekor qilish":
-        return await cancel_order(update, context)
-
-    if text == "⬅️ Ortga":
-        set_step(context, OrderState.TIME)
-        await update.message.reply_text(
-            "Qulay vaqtni qayta tanlang.",
-            reply_markup=kb_time(),
-        )
-        return OrderState.TIME
-
-    draft = get_draft(context)
-    draft.payment = SKIP_VALUE if text == "🔸 O'tkazib yuborish" else text
-    save_draft(context, draft)
-    set_step(context, OrderState.NOTE)
-
-    await update.message.reply_text(
-        "Qo'shimcha izoh yozing yoki o'tkazib yuboring.",
-        reply_markup=kb_note(),
-    )
-    return OrderState.NOTE
-
-
-async def note_state(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    text = normalize_text(update.message.text)
-
-    if text == "❌ Bekor qilish":
-        return await cancel_order(update, context)
-
-    if text == "⬅️ Ortga":
-        set_step(context, OrderState.PAYMENT)
-        await update.message.reply_text(
-            "To'lov turini qayta tanlang.",
-            reply_markup=kb_payment(),
-        )
-        return OrderState.PAYMENT
-
-    draft = get_draft(context)
-    draft.note = SKIP_VALUE if text == "🔸 O'tkazib yuborish" else text
-    save_draft(context, draft)
-    set_step(context, OrderState.CONFIRM)
-
-    await update.message.reply_text(
-        confirmation_text(draft),
-        reply_markup=kb_confirm(),
-    )
-    return OrderState.CONFIRM
-
-
-# =========================
-# CONFIRM CALLBACK
-# =========================
-
-async def confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-
-    draft = get_draft(context)
-
-    if query.data == "cancel":
-        clear_draft(context)
-        await query.edit_message_text("Buyurtma bekor qilindi.")
-        return ConversationHandler.END
-
-    if query.data == "edit":
-        set_step(context, OrderState.NAME)
-        await query.edit_message_text("Buyurtmani tahrirlash uchun qayta boshlang.")
-        await query.message.reply_text(
-            "Ismingizni kiriting.",
-            reply_markup=kb_name(),
-        )
-        return OrderState.NAME
-
-    if query.data == "confirm":
-        order_id = generate_order_id()
-
-        await write_to_google_sheets(order_id, draft, update.effective_user)
-        await send_to_crm(order_id, draft, update.effective_user)
-        await send_to_operator(update, order_id, draft)
-
-        clear_draft(context)
-
-        await query.edit_message_text(
-            f"✅ Buyurtmangiz muvaffaqiyatli qabul qilindi!
-"
-            f"📄 Buyurtma raqami: {order_id}
-"
-            f"📞 Operatorlarimiz tez orada siz bilan bog'lanishadi.
-"
-            f"📦 Buyurtmangiz holatini "📦 Buyurtmam holati" bo'limi orqali kuzatishingiz mumkin."
-        )
-        return ConversationHandler.END
-
-    return OrderState.CONFIRM
-
-
-# =========================
-# APP
-# =========================
-
-def build_app() -> Application:
-    app = Application.builder().token(BOT_TOKEN).build()
-
-    order_conv = ConversationHandler(
-        entry_points=[CommandHandler("order", start_order)],
-        states={
-            OrderState.NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, name_state)],
-            OrderState.PHONE: [
-                MessageHandler(filters.CONTACT, phone_state),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, phone_state),
-            ],
-            OrderState.ADDRESS: [
-                MessageHandler(filters.LOCATION, address_state),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, address_state),
-            ],
-            OrderState.OBJECT_TYPE: [MessageHandler(filters.TEXT & ~filters.COMMAND, object_type_state)],
-            OrderState.PEST_TYPE: [MessageHandler(filters.TEXT & ~filters.COMMAND, pest_type_state)],
-            OrderState.MEDIA: [
-                MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.ALL, media_state),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, media_state),
-            ],
-            OrderState.TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, time_state)],
-            OrderState.PAYMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, payment_state)],
-            OrderState.NOTE: [MessageHandler(filters.TEXT & ~filters.COMMAND, note_state)],
-            OrderState.CONFIRM: [CallbackQueryHandler(confirm_callback)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel_order)],
-        allow_reentry=True,
-    )
-
-    app.add_handler(order_conv)
-    app.add_handler(CommandHandler("cancel", cancel_order))
-    return app
-
-
-def main() -> None:
-    app = build_app()
-    app.run_polling(close_loop=False)
-
-
-if __name__ == "__main__":
-    main()
+    await update.message.chat.send_action("typing")
+    answer = await ask_gemini
