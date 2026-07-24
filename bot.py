@@ -94,9 +94,15 @@ ABOUT_TEXT = (
 )
 
 WARRANTY_TEXT = (
-    "🛡 <b>Kafolat shartlari</b>\n\n"
-    "Barcha xizmatlarimizga kafolat beriladi. Kafolat muddati va shartlari haqida "
-    "operatorlarimizdan buyurtma vaqtida to'liq ma'lumot olasiz."
+    "🛡️ <b>NANODEZ KAFOLATI</b>\n\n"
+    "✅ Har bir xizmat uchun yozma yoki elektron kafolat taqdim etiladi.\n"
+    "📅 Kafolat muddati: bajarilgan xizmat turiga qarab 3 oydan 1 yilgacha.\n"
+    "📋 Kafolat davomida:\n"
+    "• Zararkunandalar qayta paydo bo'lsa, bepul qayta ishlov beriladi.\n"
+    "• Kafolat shartlariga rioya qilingan bo'lishi kerak.\n"
+    "• Kafolat shartnomada ko'rsatiladi.\n\n"
+    "📞 Batafsil ma'lumot: +998 55 511-11-13\n"
+    "💬 Buyurtma berish uchun \"📝 Buyurtma berish\" tugmasini bosing."
 )
 # =====================================
 
