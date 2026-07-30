@@ -65,7 +65,7 @@ pdfmetrics.registerFont(TTFont("DejaVu-Bold", os.path.join(FONT_DIR, "DejaVuSans
 WEBSITE_URL = "https://nanodez.uz/"
 
 # ============ NANODEZ AI (Gemini) ============
-GEMINI_API_KEY = "AQ.Ab8RN6IIor7qJxgkjkQ9nOypVf4kM57J0N7esF2mTUqj9CAPKw"
+GEMINI_API_KEY = "AQ.Ab8RN6IkQQcTM9a37Bogb7j7rmBKnjiDeX9kRAiuMuD-L1wtVA"
 GEMINI_MODEL = "gemini-flash-latest"
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
